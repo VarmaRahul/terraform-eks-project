@@ -1,0 +1,160 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-endpoints-config
+  namespace: default
+data:
+  BACKEND_SVC_URL: "http://backend-svc:8080"
+  BACKEND_SVC_NAME: "backend-svc"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-svc
+  namespace: default
+  labels:
+    app: backend-app
+spec:
+  type: ClusterIP
+  selector:
+    app: backend-app
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-app
+  namespace: default
+  labels:
+    app: backend-app
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: backend-app
+
+  template:
+    metadata:
+      labels:
+        app: backend-app
+
+    spec:
+      volumes:
+        - name: env-config-volume
+          emptyDir: {}
+
+      initContainers:
+        - name: simulate-fetch-config
+          image: busybox:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Simulating config fetch locally..."
+              echo "APP_ENV=local" > /config/dev.env
+              echo "Mock download complete!"
+
+          volumeMounts:
+            - name: env-config-volume
+              mountPath: /config
+
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:0.2.3
+
+          args:
+            - "-text={\"status\": \"success\", \"service\": \"backend\", \"message\": \"Serving with local config loaded!\"}"
+            - "-listen=:8080"
+
+          ports:
+            - containerPort: 8080
+
+          volumeMounts:
+            - name: env-config-volume
+              mountPath: /app/config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-svc
+  namespace: default
+  labels:
+    app: frontend-app
+spec:
+  type: ClusterIP
+
+  selector:
+    app: frontend-app
+
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend-app
+  namespace: default
+  labels:
+    app: frontend-app
+spec:
+  replicas: 1
+
+  selector:
+    matchLabels:
+      app: frontend-app
+
+  template:
+    metadata:
+      labels:
+        app: frontend-app
+
+    spec:
+      containers:
+        - name: nginx-frontend
+          image: nginx:latest
+
+          ports:
+            - containerPort: 80
+
+          env:
+            - name: BACKEND_SVC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: app-endpoints-config
+                  key: BACKEND_SVC_URL
+
+          command:
+            - /bin/sh
+            - -c
+
+          args:
+            - |
+              cat << 'EOF' > /etc/nginx/conf.d/default.conf
+              server {
+                  listen 80;
+
+                  location / {
+                      default_type text/html;
+                      return 200 "<h1>Welcome to Frontend Service in EKS!</h1><p>Call <a href='/api'>/api</a> to reach the backend.</p>\n";
+                  }
+
+                  location /api {
+                      proxy_pass http://backend-svc:8080;
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                  }
+              }
+              EOF
+
+              nginx -g "daemon off;"
